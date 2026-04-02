@@ -5,11 +5,23 @@ from maelstrom import Node, Request, Body
 
 node = Node()
 topology = {}
-values = []
+values = set()
 
 @node.handler
 async def broadcast(req: Request) -> Body:
-  values.append(req.body["message"])
+  incoming = req.body["message"]
+
+  if incoming in values:
+    return {
+      "type": "broadcast_ok"
+    }
+
+  values.add(incoming)
+  neighbors = topology[node.node_id]
+  for neighbor in neighbors:
+    neighborReq = Request(src=node.node_id, dest=neighbor, body=req.body)
+    node.spawn(node.send(neighborReq))
+
   return {
     "type": "broadcast_ok"
   }
@@ -18,7 +30,7 @@ async def broadcast(req: Request) -> Body:
 async def read(req: Request) -> Body:
   return {
     "type": "read_ok",
-    "messages": values,
+    "messages": list(values),
   }
 
 @node.handler
