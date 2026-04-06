@@ -4,29 +4,55 @@ from maelstrom import Node, Request, Body
 import asyncio
 import sys
 
+class NodeState:
+  def __init__(self, node):
+    self.node = node
+    self.network_topology = {}
+    self.values = {}
+    self.current_version = 0
+    self.lock = asyncio.Lock()
+  
+  def getNeighbors(self):
+    return self.network_topology[self.node.node_id]
+  
+  async def getValues(self, minVersion=0):
+    result = []
+
+    async with self.lock:
+      for value, version in self.values.items():
+        if version >= minVersion:
+          result.append(value)
+      return result
+
+  async def hasValue(self, val):
+    async with self.lock:
+      return val in self.values
+
+  async def addValues(self, items):
+    async with self.lock:
+      for item in items:
+        if item not in self.values:
+          self.values[item] = self.current_version
+      self.current_version += 1
+
 node = Node()
-lock = asyncio.Lock()
-# can't be named `topology`, the handler function apparently would shadow this variable
-network_topology = {}
-values = set()
+state = NodeState(node)
 
 @node.handler
 async def broadcast(req: Request) -> Body:
   incoming = req.body["message"]
 
-  if incoming in values:
+  if await state.hasValue(incoming):
     return {
       "type": "broadcast_ok"
     }
 
-  async with lock:
-    values.add(incoming)
+  await state.addValues([incoming])
 
-  neighbors = network_topology[node.node_id]
+  neighbors = state.getNeighbors()
   for neighbor in neighbors:
     neighborReq = Request(src=node.node_id, dest=neighbor, body=req.body)
     node.spawn(node.send(neighborReq))
-    # node.spawn(_sendMessageWithRetry(neighbor, incoming))
 
   return {
     "type": "broadcast_ok"
@@ -34,19 +60,50 @@ async def broadcast(req: Request) -> Body:
 
 @node.handler
 async def read(req: Request) -> Body:
-  async with lock:
-    return {
-      "type": "read_ok",
-      "messages": list(values),
-    }
+  return {
+    "type": "read_ok",
+    "messages": await state.getValues(),
+  }
 
 @node.handler
 async def topology(req: Request) -> Body:
-  global network_topology
-  network_topology = req.body["topology"]
+  state.network_topology = req.body["topology"]
   return {
     "type": "topology_ok",
   }
+
+async def _readFromNeighbor(neighbor):
+  neighborReq = Request(src=node.node_id, dest=neighbor, body={
+    "type": "read",
+  })
+  response = await node.rpc(neighbor, neighborReq.body)
+  if response["type"] == "error":
+    return
+
+  await state.addValues(response["messages"])
+
+async def _pollNeighbors():
+  while True:
+    await asyncio.sleep(1)
+    neighbors = state.getNeighbors()
+    # parallelize call
+    for neighbor in neighbors:
+      asyncio.create_task(_readFromNeighbor(neighbor))
+
+def pollNeighbors():
+  asyncio.get_running_loop().create_task(_pollNeighbors())
+
+node.run(pollNeighbors)
+
+
+
+
+
+
+
+
+
+
 
 # sendMessageWithRetry
 # async def _sendMessageWithRetry(neighbor, message):
@@ -64,28 +121,3 @@ async def topology(req: Request) -> Body:
 
 #     print("--- SUCCESS sendMessageWithRetry --- ", file=sys.stderr)
 #     return
-
-async def _readFromNeighbor(neighbor):
-  neighborReq = Request(src=node.node_id, dest=neighbor, body={
-    "type": "read",
-  })
-  response = await node.rpc(neighbor, neighborReq.body)
-  if response["type"] == "error":
-    return
-
-  async with lock:
-    global values
-    values |= set(response["messages"])
-
-async def _pollNeighbors():
-  while True:
-    await asyncio.sleep(1)
-    neighbors = network_topology[node.node_id]
-    # parallelize call
-    for neighbor in neighbors:
-      asyncio.create_task(_readFromNeighbor(neighbor))
-
-def pollNeighbors():
-  asyncio.get_running_loop().create_task(_pollNeighbors())
-
-node.run(pollNeighbors)
