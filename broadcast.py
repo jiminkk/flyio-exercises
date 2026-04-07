@@ -3,7 +3,59 @@
 from maelstrom import Node, Request, Body
 from collections import defaultdict
 import asyncio
-import sys
+
+STAR_TOPOLOGY = {
+  "n0": [
+    "n1",
+    "n2",
+    "n3",
+    "n4",
+    "n5",
+    "n6",
+    "n7",
+    "n8",
+    "n9",
+    "n10",
+    "n11",
+    "n12",
+    "n13",
+    "n14",
+    "n15",
+    "n16",
+    "n17",
+    "n18",
+    "n19",
+    "n20",
+    "n21",
+    "n22",
+    "n23",
+    "n24",
+  ],
+  "n1": ["n0"],
+  "n2": ["n0"],
+  "n3": ["n0"],
+  "n4": ["n0"],
+  "n5": ["n0"],
+  "n6": ["n0"],
+  "n7": ["n0"],
+  "n8": ["n0"],
+  "n9": ["n0"],
+  "n10": ["n0"],
+  "n11": ["n0"],
+  "n12": ["n0"],
+  "n13": ["n0"],
+  "n14": ["n0"],
+  "n15": ["n0"],
+  "n16": ["n0"],
+  "n17": ["n0"],
+  "n18": ["n0"],
+  "n19": ["n0"],
+  "n20": ["n0"],
+  "n21": ["n0"],
+  "n22": ["n0"],
+  "n23": ["n0"],
+  "n24": ["n0"],
+}
 
 class NodeState:
   def __init__(self, node):
@@ -13,6 +65,9 @@ class NodeState:
     self.neighbor_versions = defaultdict(lambda: 0)
     self.current_version = 0
     self.lock = asyncio.Lock()
+
+  def updateTopology(self, topology):
+    self.network_topology = topology
   
   def getNeighbors(self):
     return self.network_topology[self.node.node_id]
@@ -20,6 +75,11 @@ class NodeState:
   async def getNeighborVersion(self, neighborId):
     async with self.lock:
       return self.neighbor_versions[neighborId]
+
+  async def getCurrentVersion(self):
+    async with self.lock:
+      return self.current_version
+
 
   async def updateNeighborVersion(self, neighborId, version):
     async with self.lock:
@@ -32,7 +92,7 @@ class NodeState:
       for value, version in self.values.items():
         if version >= minVersion:
           result.append(value)
-      return result
+      return result, self.current_version
 
   async def hasValue(self, val):
     async with self.lock:
@@ -48,7 +108,7 @@ class NodeState:
           did_add = True
       if did_add:
         self.current_version = next_version
-      return did_add
+      return self.current_version, did_add
 
 node = Node()
 state = NodeState(node)
@@ -57,15 +117,7 @@ state = NodeState(node)
 async def broadcast(req: Request) -> Body:
   incoming = req.body["message"]
 
-  did_add = await state.addValues([incoming])
-  if not did_add:
-    return {
-      "type": "broadcast_ok"
-    }
-
-  neighbors = state.getNeighbors()
-  for neighbor in neighbors:
-    node.spawn(updateNeighbor(neighbor))
+  _, _ = await state.addValues([incoming])
 
   return {
     "type": "broadcast_ok"
@@ -75,27 +127,21 @@ async def broadcast(req: Request) -> Body:
 async def broadcast_multiple(req: Request) -> Body:
   messages = req.body["messages"]
 
-  did_add = await state.addValues(messages)
-  if not did_add:
-    return {
-      "type": "broadcast_multiple_ok"
-    }
-  
-  neighbors = state.getNeighbors()
-  for neighbor in neighbors:
-    node.spawn(updateNeighbor(neighbor))
+  _, _ = await state.addValues(messages)
+
+  return {"type": "broadcast_ok"}
 
 
 @node.handler
-async def read(req: Request) -> Body:
+async def read(_: Request) -> Body:
   return {
     "type": "read_ok",
-    "messages": await state.getValues(),
+    "messages": (await state.getValues())[0],
   }
 
 @node.handler
-async def topology(req: Request) -> Body:
-  state.network_topology = req.body["topology"]
+async def topology(_: Request) -> Body:
+  state.updateTopology(STAR_TOPOLOGY)
   return {
     "type": "topology_ok",
   }
@@ -105,7 +151,10 @@ async def updateNeighbor(neighborId):
   version = await state.getNeighborVersion(neighborId) + 1
 
   # get all values that need to be sent to neighbor based on its version
-  values = await state.getValues(version)
+  values, sent_version = await state.getValues(version)
+
+  if not values:
+    return
 
   # send the values in multi-broadcast rpc
   request = Request(src=node.node_id, dest=neighborId, body={
@@ -118,45 +167,20 @@ async def updateNeighbor(neighborId):
   if response["type"] == "error":
     return
 
-  await updateNeighborVersion(neighborId, state.current_version)
+  await state.updateNeighborVersion(neighborId, sent_version)
 
 
-async def _updateNeighbor():
+async def _updateNeighbors():
   while True:
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.15)
     neighbors = state.getNeighbors()
     # parallelize call
     for neighbor in neighbors:
       asyncio.create_task(updateNeighbor(neighbor))
 
+
 def updateNeighbors():
-  asyncio.get_running_loop().create_task(_updateNeighbor())
+  asyncio.get_running_loop().create_task(_updateNeighbors())
+
 
 node.run(updateNeighbors)
-
-
-
-
-
-
-
-
-
-
-
-# sendMessageWithRetry
-# async def _sendMessageWithRetry(neighbor, message):
-#   neighborReq = Request(src=node.node_id, dest=neighbor, body={
-#     "type": "broadcast",
-#     "message": message,
-#   })
-
-#   while True:
-#     response = await node.rpc(neighbor, neighborReq.body)
-#     if response["type"] == "error":
-#       print("--- ERROR sendMessageWithRetry on " + neighbor, file=sys.stderr)
-#       # await asyncio.sleep(0.5)
-#       continue
-
-#     print("--- SUCCESS sendMessageWithRetry --- ", file=sys.stderr)
-#     return
