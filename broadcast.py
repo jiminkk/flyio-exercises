@@ -63,10 +63,6 @@ async def broadcast(req: Request) -> Body:
       "type": "broadcast_ok"
     }
 
-  neighbors = state.getNeighbors()
-  for neighbor in neighbors:
-    node.spawn(updateNeighbor(neighbor))
-
   return {
     "type": "broadcast_ok"
   }
@@ -118,7 +114,7 @@ async def updateNeighbor(neighborId):
   if response["type"] == "error":
     return
 
-  await updateNeighborVersion(neighborId, state.current_version)
+  await state.updateNeighborVersion(neighborId, state.current_version)
 
 
 async def _updateNeighbor():
@@ -133,7 +129,6 @@ def updateNeighbors():
   asyncio.get_running_loop().create_task(_updateNeighbor())
 
 node.run(updateNeighbors)
-
 
 
 
