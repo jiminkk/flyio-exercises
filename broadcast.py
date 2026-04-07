@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
+import math
 from maelstrom import Node, Request, Body
 from collections import defaultdict
 import asyncio
-import sys
 
 class NodeState:
   def __init__(self, node):
@@ -15,7 +15,7 @@ class NodeState:
     self.lock = asyncio.Lock()
   
   def getNeighbors(self):
-    return self.network_topology[self.node.node_id]
+    return self.network_topology.get(self.node.node_id, [])
 
   async def getNeighborVersion(self, neighborId):
     async with self.lock:
@@ -32,7 +32,7 @@ class NodeState:
       for value, version in self.values.items():
         if version >= minVersion:
           result.append(value)
-      return result
+      return result, self.current_version
 
   async def hasValue(self, val):
     async with self.lock:
@@ -57,11 +57,7 @@ state = NodeState(node)
 async def broadcast(req: Request) -> Body:
   incoming = req.body["message"]
 
-  did_add = await state.addValues([incoming])
-  if not did_add:
-    return {
-      "type": "broadcast_ok"
-    }
+  await state.addValues([incoming])
 
   return {
     "type": "broadcast_ok"
@@ -71,27 +67,49 @@ async def broadcast(req: Request) -> Body:
 async def broadcast_multiple(req: Request) -> Body:
   messages = req.body["messages"]
 
-  did_add = await state.addValues(messages)
-  if not did_add:
-    return {
-      "type": "broadcast_multiple_ok"
-    }
-  
-  neighbors = state.getNeighbors()
-  for neighbor in neighbors:
-    node.spawn(updateNeighbor(neighbor))
+  await state.addValues(messages)
 
+  return {
+    "type": "broadcast_multiple_ok"
+  }
 
 @node.handler
 async def read(req: Request) -> Body:
+  values, _ = await state.getValues()
   return {
     "type": "read_ok",
-    "messages": await state.getValues(),
+    "messages": values,
   }
 
 @node.handler
 async def topology(req: Request) -> Body:
-  state.network_topology = req.body["topology"]
+  allIds = sorted(node.node_ids, key=lambda s: int(s[1:]))
+  nodeLen = len(allIds)
+
+  # implement lieutenant topology
+  lieutenantsLen = max(2, round(math.sqrt(nodeLen)))
+
+  # pick the same first nodes in sorted list of nodes so all node share the same lieutenants
+  lieutenants = allIds[:lieutenantsLen]
+  leaves = allIds[lieutenantsLen:]
+
+  lieutenantTopology = {key: [] for key in lieutenants}
+  leafTopology = {key: [] for key in leaves}
+
+  # for each lieutenant, we will connect it to rest of the lieutenants + leaves to connect it to
+  for i, l in enumerate(lieutenants):
+    for other in lieutenants:
+      if other != l:
+        lieutenantTopology[l].append(other)
+    for j, leaf in enumerate(leaves):
+      if j % lieutenantsLen == i:
+        lieutenantTopology[l].append(leaf)
+
+  # for each leaf, connect it to the lieutenants it belongs to
+  for i, leaf in enumerate(leaves):
+    leafTopology[leaf] = [lieutenants[i % lieutenantsLen]]
+
+  state.network_topology = lieutenantTopology | leafTopology
   return {
     "type": "topology_ok",
   }
@@ -101,7 +119,9 @@ async def updateNeighbor(neighborId):
   version = await state.getNeighborVersion(neighborId) + 1
 
   # get all values that need to be sent to neighbor based on its version
-  values = await state.getValues(version)
+  values, snapshot_version = await state.getValues(version)
+  if not values:
+    return
 
   # send the values in multi-broadcast rpc
   request = Request(src=node.node_id, dest=neighborId, body={
@@ -114,12 +134,12 @@ async def updateNeighbor(neighborId):
   if response["type"] == "error":
     return
 
-  await state.updateNeighborVersion(neighborId, state.current_version)
+  await state.updateNeighborVersion(neighborId, snapshot_version)
 
 
 async def _updateNeighbor():
   while True:
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.4)
     neighbors = state.getNeighbors()
     # parallelize call
     for neighbor in neighbors:
@@ -129,29 +149,3 @@ def updateNeighbors():
   asyncio.get_running_loop().create_task(_updateNeighbor())
 
 node.run(updateNeighbors)
-
-
-
-
-
-
-
-
-
-
-# sendMessageWithRetry
-# async def _sendMessageWithRetry(neighbor, message):
-#   neighborReq = Request(src=node.node_id, dest=neighbor, body={
-#     "type": "broadcast",
-#     "message": message,
-#   })
-
-#   while True:
-#     response = await node.rpc(neighbor, neighborReq.body)
-#     if response["type"] == "error":
-#       print("--- ERROR sendMessageWithRetry on " + neighbor, file=sys.stderr)
-#       # await asyncio.sleep(0.5)
-#       continue
-
-#     print("--- SUCCESS sendMessageWithRetry --- ", file=sys.stderr)
-#     return
